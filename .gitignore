@@ -3,7 +3,6 @@
 
 # default results ANN model (optional mantain or delete)
 greek_letters_model.pkl
-Greek_features.csv
 
 ### Linux ###
 *~

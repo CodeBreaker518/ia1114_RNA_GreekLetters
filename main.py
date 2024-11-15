@@ -14,8 +14,6 @@ import uvicorn
 # threading
 import threading
 
-
-
 class NeuralNetwork:
     def __init__(self, input_size, hidden_size, output_size, learning_rate=0.01, epochs=100, batch_size=32):
         self.input_size = input_size
@@ -34,6 +32,7 @@ class NeuralNetwork:
             2.0 / (self.hidden_size + self.output_size))
         self.b2 = np.zeros((1, self.output_size))
 
+    # Helper method to preprocess an image
     def preprocess_image(self, image):
         # Handle different input types
         if isinstance(image, bytes):
@@ -121,10 +120,8 @@ class NeuralNetwork:
 
         return hog_features.flatten()
 
+    # Helper method to visualize preprocessing steps.
     def debug_preprocessing(self, image):
-        """
-        Helper method to visualize preprocessing steps.
-        """
         # Store original image
         debug_images = {'original': image.copy()}
 
@@ -150,12 +147,14 @@ class NeuralNetwork:
 
         return debug_images
 
+    # Hyperbolic tangent activation function (-1 to +1)
     def tanh(self, x):
         return np.tanh(x)
 
     def tanh_derivative(self, x):
         return 1.0 - np.tanh(x) ** 2
 
+    # Softmax activation function (for output layer)
     def softmax(self, x):
         exp_x = np.exp(x - np.max(x, axis=1, keepdims=True))
         return exp_x / np.sum(exp_x, axis=1, keepdims=True)
@@ -167,6 +166,7 @@ class NeuralNetwork:
         self.a2 = self.softmax(self.z2)
         return self.a2
 
+    # Backpropagation algorithm
     def backward(self, X, y, output):
         m = X.shape[0]
         delta2 = output - y
@@ -265,14 +265,19 @@ class NeuralNetwork:
         print(f"Model saved as {filename}")
 
     def load_model(self, filename='greek_letters_model.pkl'):
-        with open(filename, 'rb') as f:
-            model_data = pickle.load(f)
-        self.W1 = model_data['W1']
-        self.b1 = model_data['b1']
-        self.W2 = model_data['W2']
-        self.b2 = model_data['b2']
-        self.label_mapping = model_data['label_mapping']
-        print("Model loaded successfully")
+        try:
+            with open(filename, 'rb') as f:
+                model_data = pickle.load(f)
+            self.W1 = model_data['W1']
+            self.b1 = model_data['b1']
+            self.W2 = model_data['W2']
+            self.b2 = model_data['b2']
+            self.label_mapping = model_data['label_mapping']
+            print("Model loaded successfully")
+        except FileNotFoundError:
+            print(f"Error: Model file '{filename}' not found.")
+        except Exception as e:
+            print(f"Error loading model: {str(e)}")
 
 
 # FastAPI setup
@@ -299,9 +304,8 @@ except:
 
 
 @app.get('/')
-async def index():
+async def health_check():
     return {"message": "Ok!"}
-
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -322,10 +326,8 @@ async def predict(file: UploadFile = File(...)):
             "message": str(e)
         }
 
-
 def run_api():
     uvicorn.run(app, host="localhost", port=8000)
-
 
 def main_menu():
     while True:
@@ -349,7 +351,6 @@ def main_menu():
             break
         else:
             print("Invalid option, please try again")
-
 
 def training_menu(network):
     X = None
