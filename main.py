@@ -1,12 +1,24 @@
+# array operations
 import numpy as np
-import cv2
+# read and preprocessing images
 import os
+import cv2
+# save and load model
 import pickle
+# shuffle data
 from sklearn.utils import shuffle
+# FastAPI
+from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+# threading
+import threading
+
+
 
 class NeuralNetwork:
     def __init__(self, input_size, hidden_size, output_size, learning_rate=0.01, epochs=100, batch_size=32):
-        self.input_size = input_size #features
+        self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.learning_rate = learning_rate
@@ -14,11 +26,129 @@ class NeuralNetwork:
         self.batch_size = batch_size
         self.label_mapping = {}
 
-        # Weights initialization using He initialization
-        self.W1 = np.random.randn(self.input_size, self.hidden_size) * np.sqrt(2.0 / (self.input_size + self.hidden_size))
+        # Initialize weights and biases
+        self.W1 = np.random.randn(self.input_size, self.hidden_size) * np.sqrt(
+            2.0 / (self.input_size + self.hidden_size))
         self.b1 = np.zeros((1, self.hidden_size))
-        self.W2 = np.random.randn(self.hidden_size, self.output_size) * np.sqrt(2.0 / (self.hidden_size + self.output_size))
+        self.W2 = np.random.randn(self.hidden_size, self.output_size) * np.sqrt(
+            2.0 / (self.hidden_size + self.output_size))
         self.b2 = np.zeros((1, self.output_size))
+
+    def preprocess_image(self, image):
+        # Handle different input types
+        if isinstance(image, bytes):
+            nparr = np.frombuffer(image, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        elif isinstance(image, str):
+            image = cv2.imread(image, cv2.IMREAD_GRAYSCALE)
+        elif len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        if image is None:
+            raise ValueError("Could not load or process the image")
+
+        # Ensure letter is black on white background
+        if np.mean(image) < 127:
+            image = 255 - image
+
+        # Binarize the image (Otsu's method)
+        _, binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Find bounding box of content
+        coords = cv2.findNonZero(binary)
+        if coords is None:
+            # If no content found, return empty image
+            return np.zeros((128, 64), dtype=np.float32)
+
+        x, y, w, h = cv2.boundingRect(coords)
+
+        # Extract the letter
+        letter = binary[y:y + h, x:x + w]
+
+        # Get the maximum dimension
+        maximum = max(w, h)
+
+        # Create a square white image slightly larger than our letter
+        square_size = int(maximum * 1.2)  # 20% padding
+        square_img = np.zeros((square_size, square_size), dtype=np.uint8)
+
+        # Calculate center offset
+        x_offset = (square_size - w) // 2
+        y_offset = (square_size - h) // 2
+
+        # Place the letter in the center of the square image
+        square_img[y_offset:y_offset + h, x_offset:x_offset + w] = letter
+
+        # Resize to target size (64x128) using aspect ratio of 1:2
+        target_size = (64, 128)
+        processed_image = cv2.resize(square_img, target_size, interpolation=cv2.INTER_AREA)
+
+        # Normalize to [0, 1] range
+        processed_image = processed_image.astype(np.float32) / 255.0
+
+        return processed_image
+
+    # Extract HOG features with OpenCV
+    def extract_features(self, image):
+
+        # Preprocess the image
+        processed_image = self.preprocess_image(image)
+
+        # Convert back to uint8 for HOG
+        processed_image = (processed_image * 255).astype(np.uint8)
+
+        # Configure HOG parameters
+        winSize = (64, 128)
+        blockSize = (16, 16)
+        blockStride = (8, 8)
+        cellSize = (8, 8)
+        nbins = 9
+
+        # Create and configure HOG descriptor
+        hog = cv2.HOGDescriptor(
+            winSize,
+            blockSize,
+            blockStride,
+            cellSize,
+            nbins
+        )
+
+        # Compute HOG features
+        hog_features = hog.compute(processed_image)
+
+        if hog_features is None:
+            raise ValueError("Could not compute HOG features")
+
+        return hog_features.flatten()
+
+    def debug_preprocessing(self, image):
+        """
+        Helper method to visualize preprocessing steps.
+        """
+        # Store original image
+        debug_images = {'original': image.copy()}
+
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        debug_images['grayscale'] = image.copy()
+
+        # Binarize
+        _, binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        debug_images['binary'] = binary.copy()
+
+        # Get bounding box
+        coords = cv2.findNonZero(binary)
+        x, y, w, h = cv2.boundingRect(coords)
+        bbox_image = image.copy()
+        cv2.rectangle(bbox_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        debug_images['bounding_box'] = bbox_image
+
+        # Get final processed image
+        processed = self.preprocess_image(image)
+        debug_images['final'] = (processed * 255).astype(np.uint8)
+
+        return debug_images
 
     def tanh(self, x):
         return np.tanh(x)
@@ -31,33 +161,22 @@ class NeuralNetwork:
         return exp_x / np.sum(exp_x, axis=1, keepdims=True)
 
     def forward(self, X):
-        # Hidden layer
         self.z1 = np.dot(X, self.W1) + self.b1
         self.a1 = self.tanh(self.z1)
-
-        # Output layer
         self.z2 = np.dot(self.a1, self.W2) + self.b2
         self.a2 = self.softmax(self.z2)
-
         return self.a2
 
     def backward(self, X, y, output):
         m = X.shape[0]
-
-        # Output layer error
         delta2 = output - y
-
-        # Hidden layer error
         delta1 = np.dot(delta2, self.W2.T) * self.tanh_derivative(self.z1)
-
-        # Update weights and biases
-        self.W2 -= self.learning_rate * np.dot(self.a1.T, delta2)
-        self.b2 -= self.learning_rate * np.sum(delta2, axis=0, keepdims=True)
-        self.W1 -= self.learning_rate * np.dot(X.T, delta1)
-        self.b1 -= self.learning_rate * np.sum(delta1, axis=0, keepdims=True)
+        self.W2 -= self.learning_rate * np.dot(self.a1.T, delta2) / m
+        self.b2 -= self.learning_rate * np.sum(delta2, axis=0, keepdims=True) / m
+        self.W1 -= self.learning_rate * np.dot(X.T, delta1) / m
+        self.b1 -= self.learning_rate * np.sum(delta1, axis=0, keepdims=True) / m
 
     def train(self, X, y):
-        # Convert labels to one-hot encoding if they are not already
         if y.ndim == 1:
             num_classes = self.output_size
             y_one_hot = np.zeros((y.size, num_classes))
@@ -65,62 +184,32 @@ class NeuralNetwork:
             y = y_one_hot
 
         for epoch in range(self.epochs):
-            total_loss = 0
-            # Training in batches
+            total_error = 0
             for i in range(0, len(X), self.batch_size):
                 batch_X = X[i:i + self.batch_size]
                 batch_y = y[i:i + self.batch_size]
-
-                # Forward propagation
                 output = self.forward(batch_X)
-
-                # Backward propagation
                 self.backward(batch_X, batch_y, output)
-
-                # Calculate loss
-                loss = -np.mean(np.sum(batch_y * np.log(output + 1e-15), axis=1))
-                total_loss += loss
+                error = -np.mean(np.sum(batch_y * np.log(output + 1e-15), axis=1))
+                total_error += error
 
             if epoch % 10 == 0:
-                print(f"Epoch {epoch}, Loss: {total_loss / len(X):.4f}")
+                print(f"Epoch {epoch}, error: {total_error / len(X):.4f}")
 
     def predict(self, X):
         output = self.forward(X)
-        return np.argmax(output, axis=1)
-
-    def extract_features(self, image):
-        resized_image = cv2.resize(image, (64, 128))  # Tamaño adecuado para HOG
-        resized_image = np.array(resized_image, dtype=np.uint8)  # Asegura que sea un array de tipo uint8
-
-        # Verifica si la imagen tiene 1 canal (grayscale)
-        if len(resized_image.shape) != 2:
-            print(f"Warning: Image is not grayscale! Shape: {resized_image.shape}")
-            resized_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
-
-        hog = cv2.HOGDescriptor()
-
-        # Asegúrate de que la imagen esté en el formato correcto antes de pasarla al HOG
-        if resized_image.shape[0] == 128 and resized_image.shape[1] == 64:
-            hog_features = hog.compute(resized_image)
-        else:
-            print(f"Warning: Image has invalid dimensions: {resized_image.shape}")
-            hog_features = np.zeros((3780, 1))  # Placeholder para evitar errores
-
-        return hog_features.flatten()
-
-    def save_hog_features_to_csv(self, path, X, y):
-        import pandas as pd
-        # Convertir los datos en un DataFrame de pandas
-        data = pd.DataFrame(X)
-        data['label'] = y
-        data.to_csv(path, index=False)
-        print(f"HOG features saved to {path}")
+        predicted_class = np.argmax(output, axis=1)
+        confidence = np.max(output, axis=1)
+        return predicted_class, confidence
 
     def load_and_preprocess_images(self, folder_path):
         X, y = [], []
         label_mapping = {}
         current_label = 0
-        input_size_determined = False
+
+        if not os.path.exists(folder_path):
+            print(f"Error: Folder {folder_path} does not exist")
+            return X, y
 
         for letter_folder in os.listdir(folder_path):
             letter_path = os.path.join(folder_path, letter_folder)
@@ -133,47 +222,20 @@ class NeuralNetwork:
                     file_path = os.path.join(letter_path, filename)
 
                     if filename.endswith(".png"):
-                        image = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-
+                        image = cv2.imread(file_path)
                         if image is None:
                             print(f"Warning: Couldn't read image {file_path}")
                             continue
 
-                        features = self.extract_features(image)  # Extrae características HOG
-
-                        # Solo determina el input_size una vez
-                        if not input_size_determined:
-                            self.input_size = features.shape[0]
-                            self.W1 = np.random.randn(self.input_size, self.hidden_size) * np.sqrt(
-                                2.0 / (self.input_size + self.hidden_size))
-                            input_size_determined = True
-
+                        features = self.extract_features(image)
                         X.append(features)
                         y.append(current_label)
-
-                        # Mostrar solo la primera imagen procesada
-                        if current_label == 0 and len(y) == 1:  # Solo mostrar la primera imagen de la primera letra
-                            print(f"Showing original and preprocessed image for: {letter_folder}")
-
-                            # Mostrar la imagen original
-                            cv2.imshow("Original Image", image)
-
-                            # Preprocesar y mostrar la imagen redimensionada (para HOG)
-                            preprocessed_image = cv2.resize(image, (64, 128))  # Tamaño adecuado para HOG
-                            cv2.imshow("Preprocessed Image", preprocessed_image)
-
-                            # Esperar y cerrar la ventana de las imágenes
-                            cv2.waitKey(0)
-                            cv2.destroyAllWindows()
 
                 current_label += 1
 
         self.label_mapping = label_mapping
         print(f"Total images processed: {len(X)}")
-
-        # Mezclar los datos (imagenes y etiquetas)
         X, y = shuffle(np.array(X), np.array(y), random_state=42)
-
         return X, y
 
     def split_data(self, X, y, test_size=0.2):
@@ -185,50 +247,92 @@ class NeuralNetwork:
         return X_train, X_test, y_train, y_test
 
     def evaluate(self, X_test, y_test):
-        predictions = self.predict(X_test)
+        predictions, _ = self.predict(X_test)
         accuracy = np.mean(predictions == y_test)
         print(f"Accuracy: {accuracy * 100:.2f}%")
         return accuracy
 
     def save_model(self, filename='greek_letters_model.pkl'):
-        try:
-            model_data = {
-                'W1': self.W1,
-                'b1': self.b1,
-                'W2': self.W2,
-                'b2': self.b2,
-                'label_mapping': self.label_mapping
-            }
-            with open(filename, 'wb') as f:
-                pickle.dump(model_data, f)
-            print(f"Model saved as {filename}")
-        except FileNotFoundError:
-            print(f"Error: File {filename} not found")
+        model_data = {
+            'W1': self.W1,
+            'b1': self.b1,
+            'W2': self.W2,
+            'b2': self.b2,
+            'label_mapping': self.label_mapping
+        }
+        with open(filename, 'wb') as f:
+            pickle.dump(model_data, f)
+        print(f"Model saved as {filename}")
 
     def load_model(self, filename='greek_letters_model.pkl'):
-        try:
-            with open(filename, 'rb') as f:
-                model_data = pickle.load(f)
-            self.W1 = model_data['W1']
-            self.b1 = model_data['b1']
-            self.W2 = model_data['W2']
-            self.b2 = model_data['b2']
-            self.label_mapping = model_data['label_mapping']
-            print("Model loaded successfully")
-        except FileNotFoundError:
-            print(f"Error: File {filename} not found")
+        with open(filename, 'rb') as f:
+            model_data = pickle.load(f)
+        self.W1 = model_data['W1']
+        self.b1 = model_data['b1']
+        self.W2 = model_data['W2']
+        self.b2 = model_data['b2']
+        self.label_mapping = model_data['label_mapping']
+        print("Model loaded successfully")
+
+
+# FastAPI setup
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize neural network
+input_size = 3780  # HOG feature size for 64x128 image
+hidden_size = 392
+output_size = 24
+network = NeuralNetwork(input_size, hidden_size, output_size)
+
+try:
+    network.load_model('./greek_letters_model.pkl')
+except:
+    print("No model found, will need to train first")
+
+
+@app.get('/')
+async def index():
+    return {"message": "Ok!"}
+
+
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        features = network.extract_features(contents)
+        predicted_class, confidence = network.predict(features.reshape(1, -1))
+        predicted_letter = network.label_mapping.get(predicted_class[0], "Unknown")
+
+        return {
+            "predicted_letter": predicted_letter,
+            "confidence": float(confidence[0]),
+            "status": "success"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+def run_api():
+    uvicorn.run(app, host="localhost", port=8000)
+
 
 def main_menu():
-    input_size = 784  # Valor inicial, será redefinido en `load_and_preprocess_images`
-    hidden_size = 392
-    output_size = 24
-
-    network = NeuralNetwork(input_size, hidden_size, output_size)
-
     while True:
         print("\nMain Menu:")
         print("1. Training Mode")
         print("2. Testing Mode")
+        print("3. Run API")
         print("0. Exit")
 
         choice = input("\nEnter your choice: ")
@@ -237,11 +341,15 @@ def main_menu():
             training_menu(network)
         elif choice == "2":
             testing_menu(network)
+        elif choice == "3":
+            api_thread = threading.Thread(target=run_api)
+            api_thread.start()
         elif choice == "0":
             print("Exiting...")
             break
         else:
             print("Invalid option, please try again")
+
 
 def training_menu(network):
     X = None
@@ -249,33 +357,22 @@ def training_menu(network):
     while True:
         print("\nTraining Menu:")
         print("1. Load and preprocess images")
-        print("2. Extract HOG features and save to CSV")
-        print("3. Shuffle and split data")
-        print("4. Train model")
-        print("5. Evaluate model")
-        print("6. Save model")
+        print("2. Shuffle and split data")
+        print("3. Train model")
+        print("4. Evaluate model")
+        print("5. Save model")
         print("0. Back to main menu")
 
         choice = input("\nEnter your choice: ")
 
         if choice == "1":
-            image_folder = input("Enter the path to 'Greek_Letters' folder: ")
-            if os.path.exists(image_folder):
-                X, y = network.load_and_preprocess_images(image_folder)
+            folder_path = input("Enter the path to 'Greek_Letters' folder: ")
+            if os.path.exists(folder_path):
+                X, y = network.load_and_preprocess_images(folder_path)
             else:
                 print("Error: Folder does not exist")
 
         elif choice == "2":
-            if X is not None and y is not None:
-                print("Extracting HOG features...")
-                # Aquí podrías guardar las características HOG en un CSV
-                features_csv_path = input("Enter path to save HOG features CSV: ")
-                network.save_hog_features_to_csv(features_csv_path, X, y)
-                print("HOG features extracted and saved to CSV")
-            else:
-                print("Error: You must first load and preprocess the images (option 1)")
-
-        elif choice == "3":
             if X is not None and y is not None:
                 print("Shuffling and splitting data...")
                 X_train, X_test, y_train, y_test = network.split_data(X, y)
@@ -283,10 +380,10 @@ def training_menu(network):
             else:
                 print("Error: You must first load and preprocess the images (option 1)")
 
-        elif choice == "4":
+        elif choice == "3":
             if X is not None and y is not None:
-                if 'X_train' not in locals() or 'y_train' not in locals():
-                    print("Error: Data is not split yet. Please shuffle and split data first (option 3).")
+                if 'X_train' not in locals():
+                    print("Error: Data is not split yet. Please shuffle and split data first (option 2).")
                     continue
                 print("Training the model...")
                 network.train(X_train, y_train)
@@ -294,75 +391,71 @@ def training_menu(network):
             else:
                 print("Error: You must first load and preprocess the images (option 1)")
 
-        elif choice == "5":
+        elif choice == "4":
             if X is not None and y is not None:
-                if 'X_test' not in locals() or 'y_test' not in locals():
-                    print("Error: Data is not split yet. Please shuffle and split data first (option 3).")
+                if 'X_test' not in locals():
+                    print("Error: Data is not split yet. Please shuffle and split data first (option 2).")
                     continue
                 print("Evaluating the model...")
                 network.evaluate(X_test, y_test)
             else:
                 print("Error: You must first load and preprocess the images (option 1)")
 
-        elif choice == "6":
+        elif choice == "5":
             print("Saving the model...")
-            model_filename = input("Enter the filename to save the model (default: greek_letters_model.pkl): ").strip()
-            if not model_filename:
-                model_filename = 'greek_letters_model.pkl'
-            network.save_model(model_filename)
+            network.save_model()
+            print("Model saved successfully!")
 
         elif choice == "0":
             break
+
         else:
             print("Invalid option, please try again")
 
 def testing_menu(network):
-    model_loaded = False  # Variable para verificar si el modelo ha sido cargado
-
+    model_loaded = False
     while True:
         print("\nTesting Menu:")
         print("1. Load model")
         print("2. Test model with image")
         print("0. Back to main menu")
-
         choice = input("\nEnter your choice: ")
 
         if choice == "1":
             filename = input("Enter the filename of the model to load (default: greek_letters_model.pkl): ").strip()
             if not filename:
                 filename = 'greek_letters_model.pkl'
-            network.load_model(filename)
-            model_loaded = True
+            try:
+                network.load_model(filename)
+                model_loaded = True
+            except Exception as e:
+                print(f"Error loading model: {str(e)}")
 
         elif choice == "2":
             if not model_loaded:
                 print("Error: No model loaded. Please load a model first (Option 1).")
             else:
                 test_image_path = input("Enter the path to the image for testing: ")
-                test_image = cv2.imread(test_image_path, cv2.IMREAD_GRAYSCALE)
-
-                if test_image is None:
-                    print("Error: Could not load the image")
-                    continue
-
-                # Mostrar la imagen original
-                cv2.imshow("Original Image", test_image)
-
-                # Realizar el preprocesamiento
-                test_features = network.extract_features(test_image).reshape(1, -1)
-
-                # Mostrar la imagen preprocesada (redimensionada)
-                preprocessed_image = cv2.resize(test_image, (64, 128))  # Redimensiona a 64x128 para el HOG
-                cv2.imshow("Preprocessed Image", preprocessed_image)
-
-                # Esperar una tecla para cerrar las ventanas
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
-
-                # Realizar la predicción
-                predicted_class = network.predict(test_features)
-                predicted_letter = network.label_mapping.get(predicted_class[0], "Unknown")
-                print(f"Predicted letter: {predicted_letter}")
+                try:
+                    # Extract features directly using the new preprocessing pipeline
+                    features = network.extract_features(test_image_path)
+                    # Make prediction
+                    predicted_class, confidence = network.predict(features.reshape(1, -1))
+                    predicted_letter = network.label_mapping.get(predicted_class[0], "Unknown")
+                    print(f"Predicted letter: {predicted_letter}")
+                    print(f"Confidence: {confidence[0]:.2f}")
+                    # Load and display the original image
+                    original_image = cv2.imread(test_image_path)
+                    if original_image is not None:
+                        cv2.imshow("Original Image", original_image)
+                        # Show the preprocessed image
+                        processed_image = network.preprocess_image(test_image_path)
+                        processed_image = (processed_image * 255).astype(np.uint8)
+                        cv2.imshow("Preprocessed Image", processed_image)
+                        cv2.waitKey(0)
+                        cv2.destroyAllWindows()
+                except Exception as e:
+                    print(f"Error processing image: {str(e)}")
 
         elif choice == "0":
             break
