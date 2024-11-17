@@ -7,6 +7,8 @@ import cv2
 import pickle
 # shuffle data
 from sklearn.utils import shuffle
+#Confusion matrix
+from sklearn.metrics import confusion_matrix
 # FastAPI
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -120,32 +122,13 @@ class NeuralNetwork:
 
         return hog_features.flatten()
 
-    # Helper method to visualize preprocessing steps.
-    def debug_preprocessing(self, image):
-        # Store original image
-        debug_images = {'original': image.copy()}
-
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        debug_images['grayscale'] = image.copy()
-
-        # Binarize
-        _, binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        debug_images['binary'] = binary.copy()
-
-        # Get bounding box
-        coords = cv2.findNonZero(binary)
-        x, y, w, h = cv2.boundingRect(coords)
-        bbox_image = image.copy()
-        cv2.rectangle(bbox_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        debug_images['bounding_box'] = bbox_image
-
-        # Get final processed image
-        processed = self.preprocess_image(image)
-        debug_images['final'] = (processed * 255).astype(np.uint8)
-
-        return debug_images
+    def save_hog_features_to_csv(self, path, X, y):
+        import pandas as pd
+        # Convertir los datos en un DataFrame de pandas
+        data = pd.DataFrame(X)
+        data['label'] = y
+        data.to_csv(path, index=False)
+        print(f"HOG features saved to {path}")
 
     # Hyperbolic tangent activation function (-1 to +1)
     def tanh(self, x):
@@ -250,6 +233,11 @@ class NeuralNetwork:
         predictions, _ = self.predict(X_test)
         accuracy = np.mean(predictions == y_test)
         print(f"Accuracy: {accuracy * 100:.2f}%")
+
+        # Generate and display the confusion matrix
+        conf_matrix = confusion_matrix(y_test, predictions)
+        print("Confusion Matrix:")
+        print(conf_matrix)
         return accuracy
 
     def save_model(self, filename='greek_letters_model.pkl'):
@@ -358,10 +346,11 @@ def training_menu(network):
     while True:
         print("\nTraining Menu:")
         print("1. Load and preprocess images")
-        print("2. Shuffle and split data")
-        print("3. Train model")
-        print("4. Evaluate model")
-        print("5. Save model")
+        print("2. Extract HOG features and save to CSV")
+        print("3. Shuffle and split data")
+        print("4. Train model")
+        print("5. Evaluate model")
+        print("6. Save model")
         print("0. Back to main menu")
 
         choice = input("\nEnter your choice: ")
@@ -372,8 +361,22 @@ def training_menu(network):
                 X, y = network.load_and_preprocess_images(folder_path)
             else:
                 print("Error: Folder does not exist")
-
+        
         elif choice == "2":
+            if X is not None and y is not None:
+                print("Extracting HOG features...")
+                features_csv_path = input("Enter path to save HOG features CSV: ")
+                network.save_hog_features_to_csv(features_csv_path, X, y)
+                print("HOG features extracted and saved to CSV")
+
+                import pandas as pd
+                hog_features_df = pd.read_csv(features_csv_path)
+                print("HOG Features Preview:")
+                print(hog_features_df.head())
+            else:
+                print("Error: You must first load and preprocess the images (option 1)")
+
+        elif choice == "3":
             if X is not None and y is not None:
                 print("Shuffling and splitting data...")
                 X_train, X_test, y_train, y_test = network.split_data(X, y)
@@ -381,7 +384,7 @@ def training_menu(network):
             else:
                 print("Error: You must first load and preprocess the images (option 1)")
 
-        elif choice == "3":
+        elif choice == "4":
             if X is not None and y is not None:
                 if 'X_train' not in locals():
                     print("Error: Data is not split yet. Please shuffle and split data first (option 2).")
@@ -392,7 +395,7 @@ def training_menu(network):
             else:
                 print("Error: You must first load and preprocess the images (option 1)")
 
-        elif choice == "4":
+        elif choice == "5":
             if X is not None and y is not None:
                 if 'X_test' not in locals():
                     print("Error: Data is not split yet. Please shuffle and split data first (option 2).")
@@ -401,11 +404,12 @@ def training_menu(network):
                 network.evaluate(X_test, y_test)
             else:
                 print("Error: You must first load and preprocess the images (option 1)")
-
-        elif choice == "5":
+        
+        elif choice == "6":
             print("Saving the model...")
             network.save_model()
             print("Model saved successfully!")
+
 
         elif choice == "0":
             break
@@ -455,8 +459,10 @@ def testing_menu(network):
                         cv2.imshow("Preprocessed Image", processed_image)
                         cv2.waitKey(0)
                         cv2.destroyAllWindows()
+
                 except Exception as e:
                     print(f"Error processing image: {str(e)}")
+
 
         elif choice == "0":
             break
