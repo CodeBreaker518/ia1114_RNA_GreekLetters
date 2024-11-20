@@ -15,6 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 # threading
 import threading
+# data visualization
+import seaborn as sns
+# plot data
+import matplotlib.pyplot as plt
 
 class NeuralNetwork:
     def __init__(self, input_size, hidden_size, output_size, learning_rate=0.01, epochs=100, batch_size=32):
@@ -234,11 +238,17 @@ class NeuralNetwork:
         accuracy = np.mean(predictions == y_test)
         print(f"Accuracy: {accuracy * 100:.2f}%")
 
-        # Generate and display the confusion matrix
+        # Generate the confusion matrix
         conf_matrix = confusion_matrix(y_test, predictions)
-        print("Confusion Matrix:")
-        print(conf_matrix)
-        return accuracy
+
+        # Plot the confusion matrix
+        plt.figure(figsize=(8, 8))
+        sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=self.label_mapping.values(),
+                    yticklabels=self.label_mapping.values())
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
+        plt.show()
 
     def save_model(self, filename='greek_letters_model.pkl'):
         model_data = {
